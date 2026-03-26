@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lector de Manuales AI | Source of Truth</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <aside class="sidebar">
+            <div class="logo">Manuales AI</div>
+            <div class="sidebar-section">
+                <p class="section-title">Documentos Ingestados</p>
+                <div class="docs-list" id="docsList">
+                    <div class="doc-item active">
+                        <span>📄</span>
+                        <span>Manual_Usuario.pdf</span>
+                    </div>
+                </div>
+            </div>
+            <div class="status-badge">● Sistema Activo</div>
+        </aside>
+
+        <main class="viewer">
+            <div class="viewer-header">
+                <h1>Fuente de Verdad (Captura Original)</h1>
+                <p class="viewer-subtitle">Verifica la información directamente del manual técnico</p>
+            </div>
+            <div class="capture-container">
+                <div id="placeholder" class="placeholder">
+                    <p class="placeholder-icon">🔍</p>
+                    <p>Esperando consulta para mostrar evidencia...</p>
+                </div>
+                <img id="sourceCapture" alt="Original source capture" style="display: none;">
+            </div>
+        </main>
+
+        <section class="chat-panel">
+            <div class="chat-history" id="chatHistory">
+                <div class="message ai">
+                    Hola. Soy tu asistente para manuales técnicos. ¿En qué puedo ayudarte hoy? Puedes preguntarme detalles sobre el funcionamiento o mantenimiento.
+                </div>
+            </div>
+            <div class="chat-input-area">
+                <input type="text" class="chat-input" id="userInput" placeholder="Escribe tu pregunta aquí...">
+                <button class="send-btn" id="sendBtn">Enviar</button>
+            </div>
+        </section>
+    </div>
+    <script src="main.js" type="module"></script>
+</body>
+</html>
