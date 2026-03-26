@@ -47,7 +47,7 @@ async function saveJournal(journal) {
 }
 
 async function ingest() {
-    console.log('--- Iniciando Ingesta con OpenAI (Alta Velocidad) ---');
+    console.log('--- Iniciando Ingesta con OpenAI (Prioridad: Merida) ---');
     
     const journal = await loadJournal();
     const docsDir = path.resolve('docs');
@@ -55,108 +55,112 @@ async function ingest() {
     if (!existsSync(capturesDir)) await fs.mkdir(capturesDir, { recursive: true });
 
     const files = await fs.readdir(docsDir);
-    const pdfs = files.filter(f => f.toLowerCase().endsWith('.pdf'));
+    let pdfs = files.filter(f => f.toLowerCase().endsWith('.pdf'));
+
+    // Priorizar el manual de Merida según pedido del usuario
+    const prioritizedFile = 'merida-instruction-manual-mtb-2015.pdf';
+    if (pdfs.includes(prioritizedFile)) {
+        pdfs = [prioritizedFile]; // Solo procesamos este por ahora para ahorrar tokens
+    }
 
     if (pdfs.length === 0) {
-        console.log('No se encontraron PDFs en la carpeta /docs.');
+        console.log('No se encontraron PDFs válidos.');
         return;
     }
 
     const index = pc.index(INDEX_NAME);
+    const file = pdfs[0];
 
-    for (const file of pdfs) {
-        console.log(`\nProcesando archivo: ${file}`);
+    console.log(`\nProcesando archivo: ${file}`);
+    
+    if (!journal.processedFiles[file]) {
+        journal.processedFiles[file] = { completedPages: [] };
+    }
+
+    const pdfPath = path.join(docsDir, file);
+    const dataBuffer = await fs.readFile(pdfPath);
+    const srcDoc = await PDFDocument.load(dataBuffer);
+    const pageCount = srcDoc.getPageCount();
+
+    for (let i = 0; i < pageCount; i++) {
+        const pageNum = i + 1;
         
-        if (!journal.processedFiles[file]) {
-            journal.processedFiles[file] = { completedPages: [] };
+        if (journal.processedFiles[file].completedPages.includes(pageNum)) {
+            console.log(`- Página ${pageNum}/${pageCount} ya procesada.`);
+            continue;
         }
 
-        const pdfPath = path.join(docsDir, file);
-        const dataBuffer = await fs.readFile(pdfPath);
-        const srcDoc = await PDFDocument.load(dataBuffer);
-        const pageCount = srcDoc.getPageCount();
+        console.log(`- Procesando página ${pageNum}/${pageCount}...`);
 
-        for (let i = 0; i < pageCount; i++) {
-            const pageNum = i + 1;
+        try {
+            // 1. Extraer página
+            const newDoc = await PDFDocument.create();
+            const [copiedPage] = await newDoc.copyPages(srcDoc, [i]);
+            newDoc.addPage(copiedPage);
+            const pdfBytes = await newDoc.save();
             
-            if (journal.processedFiles[file].completedPages.includes(pageNum)) {
-                console.log(`- Página ${pageNum}/${pageCount} ya procesada.`);
+            const captureName = `${path.parse(file).name}_p${pageNum}.pdf`;
+            const capturePath = path.join(capturesDir, captureName);
+            await fs.writeFile(capturePath, pdfBytes);
+
+            const pageData = await pdfParse(Buffer.from(pdfBytes));
+            const pageText = pageData.text;
+
+            if (!pageText.trim()) {
+                journal.processedFiles[file].completedPages.push(pageNum);
+                await saveJournal(journal);
                 continue;
             }
 
-            console.log(`- Procesando página ${pageNum}/${pageCount}...`);
+            // 2. Analizar/Traducir con GPT-4o-mini
+            const completion = await callWithRetry(async () => {
+                return await openai.chat.completions.create({
+                    model: "gpt-4o-mini",
+                    messages: [
+                        { role: "system", content: "Analiza este texto de un manual técnico. Si está en inglés, tradúcelo al español de forma técnica. Mantén especificaciones y datos exactos." },
+                        { role: "user", content: pageText }
+                    ]
+                });
+            }, `OpenAI Analysis p${pageNum}`);
 
-            try {
-                // 1. Extraer página
-                const newDoc = await PDFDocument.create();
-                const [copiedPage] = await newDoc.copyPages(srcDoc, [i]);
-                newDoc.addPage(copiedPage);
-                const pdfBytes = await newDoc.save();
-                
-                const captureName = `${path.parse(file).name}_p${pageNum}.pdf`;
-                const capturePath = path.join(capturesDir, captureName);
-                await fs.writeFile(capturePath, pdfBytes);
+            const refinedText = completion.choices[0].message.content;
 
-                const pageData = await pdfParse(Buffer.from(pdfBytes));
-                const pageText = pageData.text;
+            // 3. Vectorizar con OpenAI (768 dimensiones)
+            const embeddingRes = await callWithRetry(async () => {
+                return await openai.embeddings.create({
+                    model: "text-embedding-3-small",
+                    input: refinedText,
+                    dimensions: 768
+                });
+            }, `OpenAI Embedding p${pageNum}`);
 
-                if (!pageText.trim()) {
-                    journal.processedFiles[file].completedPages.push(pageNum);
-                    await saveJournal(journal);
-                    continue;
+            const embedding = embeddingRes.data[0].embedding;
+
+            // 4. Upsert a Pinecone
+            await index.namespace('manuals').upsert([{
+                id: `${file}-p${pageNum}`,
+                values: embedding,
+                metadata: {
+                    fileName: file,
+                    page: pageNum,
+                    text: refinedText,
+                    capturePath: `public/captures/${captureName}`
                 }
+            }]);
 
-                // 2. Analizar/Traducir con GPT-4o-mini
-                const completion = await callWithRetry(async () => {
-                    return await openai.chat.completions.create({
-                        model: "gpt-4o-mini",
-                        messages: [
-                            { role: "system", content: "Analiza este texto de un manual técnico. Si está en inglés, tradúcelo al español de forma técnica. Mantén especificaciones y datos exactos." },
-                            { role: "user", content: pageText }
-                        ]
-                    });
-                }, `OpenAI Analysis p${pageNum}`);
+            journal.processedFiles[file].completedPages.push(pageNum);
+            await saveJournal(journal);
+            
+            await sleep(100);
 
-                const refinedText = completion.choices[0].message.content;
-
-                // 3. Vectorizar con OpenAI (768 dimensiones)
-                const embeddingRes = await callWithRetry(async () => {
-                    return await openai.embeddings.create({
-                        model: "text-embedding-3-small",
-                        input: refinedText,
-                        dimensions: 768
-                    });
-                }, `OpenAI Embedding p${pageNum}`);
-
-                const embedding = embeddingRes.data[0].embedding;
-
-                // 4. Upsert a Pinecone
-                await index.namespace('manuals').upsert([{
-                    id: `${file}-p${pageNum}`,
-                    values: embedding,
-                    metadata: {
-                        fileName: file,
-                        page: pageNum,
-                        text: refinedText,
-                        capturePath: `public/captures/${captureName}`
-                    }
-                }]);
-
-                journal.processedFiles[file].completedPages.push(pageNum);
-                await saveJournal(journal);
-                
-                // Delay mínimo (OpenAI pagado aguanta mucho más)
-                await sleep(100);
-
-            } catch (err) {
-                console.error(`  X Error fatal en página ${pageNum}:`, err.message);
-                await saveJournal(journal);
-                throw err;
-            }
+        } catch (err) {
+            console.error(`  X Error fatal en página ${pageNum}:`, err.message);
+            await saveJournal(journal);
+            throw err;
         }
     }
 
-    console.log('\n--- Ingesta con OpenAI completada ---');
+    console.log('\n--- Ingesta de Merida completada ---');
 }
 
 ingest().catch(err => {
