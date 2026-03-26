@@ -5,6 +5,7 @@ import { Pinecone } from '@pinecone-database/pinecone';
 import OpenAI from 'openai';
 import { PDFDocument } from 'pdf-lib';
 import pdfParse from 'pdf-parse';
+import crypto from 'crypto';
 import 'dotenv/config';
 
 // Configuración
@@ -37,17 +38,25 @@ async function callWithRetry(fn, label, retries = 5, delay = 5000) {
 async function loadJournal() {
     if (existsSync(JOURNAL_FILE)) {
         const data = await fs.readFile(JOURNAL_FILE, 'utf8');
-        return JSON.parse(data);
+        const journal = JSON.parse(data);
+        if (!journal.processedHashes) journal.processedHashes = {};
+        return journal;
     }
-    return { processedFiles: {} };
+    return { processedFiles: {}, processedHashes: {} };
 }
 
 async function saveJournal(journal) {
     await fs.writeFile(JOURNAL_FILE, JSON.stringify(journal, null, 2));
 }
 
+function getHash(text) {
+    // Normalizamos texto (letras minúsculas, sin espacios extras) para mejor detección de duplicados
+    const normalized = text.toLowerCase().replace(/\s+/g, ' ').trim();
+    return crypto.createHash('md5').update(normalized).digest('hex');
+}
+
 async function ingest() {
-    console.log('--- Iniciando Ingesta con OpenAI (Prioridad: Merida) ---');
+    console.log('--- Iniciando Ingesta Inteligente (OpenAI + Deduplicación) ---');
     
     const journal = await loadJournal();
     const docsDir = path.resolve('docs');
@@ -57,10 +66,10 @@ async function ingest() {
     const files = await fs.readdir(docsDir);
     let pdfs = files.filter(f => f.toLowerCase().endsWith('.pdf'));
 
-    // Priorizar el manual de Merida según pedido del usuario
+    // Priorizar Merida según pedido
     const prioritizedFile = 'merida-instruction-manual-mtb-2015.pdf';
     if (pdfs.includes(prioritizedFile)) {
-        pdfs = [prioritizedFile]; // Solo procesamos este por ahora para ahorrar tokens
+        pdfs = [prioritizedFile]; 
     }
 
     if (pdfs.length === 0) {
@@ -86,23 +95,18 @@ async function ingest() {
         const pageNum = i + 1;
         
         if (journal.processedFiles[file].completedPages.includes(pageNum)) {
-            console.log(`- Página ${pageNum}/${pageCount} ya procesada.`);
+            console.log(`- Página ${pageNum}/${pageCount} ya marcada como completada.`);
             continue;
         }
 
         console.log(`- Procesando página ${pageNum}/${pageCount}...`);
 
         try {
-            // 1. Extraer página
+            // 1. Extraer texto original
             const newDoc = await PDFDocument.create();
             const [copiedPage] = await newDoc.copyPages(srcDoc, [i]);
             newDoc.addPage(copiedPage);
             const pdfBytes = await newDoc.save();
-            
-            const captureName = `${path.parse(file).name}_p${pageNum}.pdf`;
-            const capturePath = path.join(capturesDir, captureName);
-            await fs.writeFile(capturePath, pdfBytes);
-
             const pageData = await pdfParse(Buffer.from(pdfBytes));
             const pageText = pageData.text;
 
@@ -113,19 +117,29 @@ async function ingest() {
             }
 
             // 2. Analizar/Traducir con GPT-4o-mini
+            // En el prompt pedimos brevedad si es algo que parece repetido (aunque el hash es mejor después de analizar)
             const completion = await callWithRetry(async () => {
                 return await openai.chat.completions.create({
                     model: "gpt-4o-mini",
                     messages: [
-                        { role: "system", content: "Analiza este texto de un manual técnico. Si está en inglés, tradúcelo al español de forma técnica. Mantén especificaciones y datos exactos." },
+                        { role: "system", content: "Traduce este texto técnico al ESPAÑOL. Sé preciso. Si el texto es una repetición exacta de instrucciones ya comunes, mantén el formato estándar." },
                         { role: "user", content: pageText }
                     ]
                 });
             }, `OpenAI Analysis p${pageNum}`);
 
             const refinedText = completion.choices[0].message.content;
+            const textHash = getHash(refinedText);
 
-            // 3. Vectorizar con OpenAI (768 dimensiones)
+            // 3. Verificar deduplicación (inteligencia para ahorrar tokens de Pinecone y evitar ruido)
+            if (journal.processedHashes[textHash]) {
+                console.log(`  ! Información duplicada detectada (Hash: ${textHash}). Saltando vectorización.`);
+                journal.processedFiles[file].completedPages.push(pageNum);
+                await saveJournal(journal);
+                continue;
+            }
+
+            // 4. Vectorizar (Solo si es información nueva/única)
             const embeddingRes = await callWithRetry(async () => {
                 return await openai.embeddings.create({
                     model: "text-embedding-3-small",
@@ -136,7 +150,11 @@ async function ingest() {
 
             const embedding = embeddingRes.data[0].embedding;
 
-            // 4. Upsert a Pinecone
+            // 5. Upsert a Pinecone
+            const captureName = `${path.parse(file).name}_p${pageNum}.pdf`;
+            const capturePath = path.join(capturesDir, captureName);
+            await fs.writeFile(capturePath, pdfBytes);
+
             await index.namespace('manuals').upsert([{
                 id: `${file}-p${pageNum}`,
                 values: embedding,
@@ -149,8 +167,10 @@ async function ingest() {
             }]);
 
             journal.processedFiles[file].completedPages.push(pageNum);
+            journal.processedHashes[textHash] = true;
             await saveJournal(journal);
             
+            console.log(`  + Página ${pageNum} agregada al índice.`);
             await sleep(100);
 
         } catch (err) {
@@ -160,7 +180,7 @@ async function ingest() {
         }
     }
 
-    console.log('\n--- Ingesta de Merida completada ---');
+    console.log('\n--- Ingesta Inteligente completada ---');
 }
 
 ingest().catch(err => {
