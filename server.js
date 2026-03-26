@@ -22,7 +22,7 @@ app.post('/api/query', async (req, res) => {
 
     try {
         // 1. Generate Query Embedding
-        const model = genAI.getGenerativeModel({ model: "text-embedding-004" }); // or 2.0 multimodal if supported for query
+        const model = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
         const result = await model.embedContent(query);
         const embedding = result.embedding.values;
 
@@ -45,7 +45,7 @@ app.post('/api/query', async (req, res) => {
         const { text, capturePath } = match.metadata;
 
         // 3. Generate Answer based on context
-        const responseModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const responseModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
         const chatResult = await responseModel.generateContent([
             `Eres un experto en manuales técnicos. Responde a la pregunta basada únicamente en el contexto proporcionado.
             IMPORTANTE: Si el contexto está en inglés, interprétalo para responder con total precisión en ESPAÑOL. No respondas en inglés bajo ninguna circunstancia.
