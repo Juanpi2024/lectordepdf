@@ -5,6 +5,7 @@
   "main": "main.js",
   "type": "module",
   "scripts": {
+    "start": "node server.js",
     "dev": "vite",
     "ingest": "node scripts/ingest.js"
   },
